@@ -1,5 +1,6 @@
 package example;
 
+
 import com.amazonaws.services.lambda.runtime.Context;
 import com.amazonaws.services.lambda.runtime.LambdaLogger;
 import com.amazonaws.services.lambda.runtime.RequestHandler;
@@ -19,13 +20,12 @@ import gov.uspto.patent.bulk.DumpFileAps;
 import gov.uspto.patent.bulk.DumpFileXml;
 import gov.uspto.patent.bulk.DumpReader;
 import gov.uspto.patent.model.Patent;
-import software.amazon.awssdk.auth.credentials.EnvironmentVariableCredentialsProvider;
+import org.postgresql.util.PGobject;
 import software.amazon.awssdk.core.sync.ResponseTransformer;
-import software.amazon.awssdk.regions.Region;
-import software.amazon.awssdk.services.rdsdata.RdsDataClient;
-import software.amazon.awssdk.services.rdsdata.model.*;
 import software.amazon.awssdk.services.s3.S3Client;
 import software.amazon.awssdk.services.s3.model.GetObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectRequest;
+import software.amazon.awssdk.services.s3.model.HeadObjectResponse;
 
 
 import java.io.File;
@@ -34,25 +34,26 @@ import java.io.StringReader;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
-import java.sql.Date;
+import java.sql.Connection;
+import java.sql.DriverManager;
+import java.sql.PreparedStatement;
+import java.sql.SQLException;
 import java.time.LocalDate;
-import java.util.HashMap;
-import java.util.Map;
 
 
 public class ProcessS3AppPatentEventLambda implements RequestHandler<S3Event, String> {
-    private static final String DB_CLUSTER_ARN = "arn:aws:rds:us-east-1:508582898882:cluster:datacollector";
-    private static final String DB_CREDENTIALS_ARN = "arn:aws:secretsmanager:us-east-1:508582898882:secret:rds!cluster-ce583560-543c-4698-81c0-e3a91caf27f1-S0lGc5";
-    private static final String DB_NAME = "postgres";
-
     @Override
     public String handleRequest(S3Event s3event, Context context) {
-       LambdaLogger logger = context.getLogger();
+        LambdaLogger logger = context.getLogger();
         S3EventNotificationRecord record = s3event.getRecords().get(0);
         String srcBucket = record.getS3().getBucket().getName();
         String srcKey = record.getS3().getObject().getUrlDecodedKey();
         Path localPath = Paths.get("/tmp", srcKey);
         int limit = 1;
+        String url = "jdbc:postgresql://patentsdb.cto8wsaak48e.us-east-2.rds.amazonaws.com:5432/postgres";
+        String user = "ptodev";
+        String password = "Gia$2013";
+        Connection conn = null;
 
         S3Client s3Client = S3Client.builder().build();
 
@@ -66,10 +67,19 @@ public class ProcessS3AppPatentEventLambda implements RequestHandler<S3Event, St
         // Log download completion and create File object
         System.out.println("Download complete. File saved to /tmp directory.");
 
-        RdsDataClient rdsDataClient = RdsDataClient.builder()
-                .region(Region.US_EAST_1)
-                .credentialsProvider(EnvironmentVariableCredentialsProvider.create())
-                .build();
+        try {
+            conn = DriverManager.getConnection(url, user, password);
+        } catch (SQLException throwables) {
+            throwables.printStackTrace();
+        }
+        if (conn == null) {
+            System.out.println("connection is null");
+
+        }
+        else {
+            System.out.println("connection is not null");
+        }
+
 
         try {
             // Create a File object from the downloaded file
@@ -86,15 +96,29 @@ public class ProcessS3AppPatentEventLambda implements RequestHandler<S3Event, St
                 default:
                     dumpReader = new DumpFileXml(inputFile);
                     FileFilterChain filters = new FileFilterChain();
+                    //filters.addRule(new PathFileFilter(""));
                     filters.addRule(new SuffixFilter("xml"));
                     dumpReader.setFileFilter(filters);
             }
+            if (dumpReader == null) {
+                System.out.println("dumpreader is null");
+
+            }
+            else {
+                System.out.println("dumpreader is not null");
+            }
+
+
 
             dumpReader.open();
+
+
+
             PatentReader patentReader = new PatentReader(patentDocFormat);
 
             for (int i = 1; dumpReader.hasNext() && i <= limit; i++) {
                 String xmlDocStr = (String) dumpReader.next();
+
 
                 try (StringReader rawText = new StringReader(xmlDocStr)) {
                     Patent patent = patentReader.read(rawText);
@@ -102,32 +126,40 @@ public class ProcessS3AppPatentEventLambda implements RequestHandler<S3Event, St
                     LocalDate filingDate = patent.getDocumentDate().getDate();
                     String inventionTitle = patent.getTitle();
                     ObjectMapper mapper = new ObjectMapper();
+                    System.out.println("RAW: " + applicationId);
+                    //Converting the Object to JSONString
                     String inventors = mapper.writeValueAsString(patent.getInventors());
                     String applicants = mapper.writeValueAsString(patent.getApplicants());
                     String assignees = mapper.writeValueAsString(patent.getAssignee());
-                    Date sqlFilingDate = Date.valueOf(filingDate);
 
-                    Map<String, SqlParameter> params = new HashMap<>();
-                    params.put("applicationId", param("applicationId", applicationId));
-                    params.put("filingDate", param("filingDate", sqlFilingDate.toString(), TypeHint.DATE));
-                    params.put("inventionTitle", param("inventionTitle", inventionTitle));
-                    params.put("inventors",  param("inventors", inventors, TypeHint.JSON));
-                    params.put("applicants", param("applicants", applicants, TypeHint.JSON));
-                    params.put("assignees",  param("assignees", assignees, TypeHint.JSON));
+                        System. out.println(filterParties(applicants));
+                    PGobject jsonInventors = new PGobject();
+                    jsonInventors.setType("json");
+                    jsonInventors.setValue(filterParties(inventors));
 
+                    PGobject jsonApplicants = new PGobject();
+                    jsonApplicants.setType("json");
+                    jsonApplicants.setValue(filterParties(applicants));
 
-                    String sql = "INSERT INTO applications (applicationId, filingDate, inventionTitle, inventors, applicants, assignees) VALUES (:applicationId, :filingDate, :inventionTitle, :inventors, :applicants, :assignees)";
-                    ExecuteStatementRequest request = ExecuteStatementRequest.builder()
-                            .secretArn(DB_CREDENTIALS_ARN)
-                            .resourceArn(DB_CLUSTER_ARN)
-                            .database(DB_NAME)
-                            .sql(sql)
-                            .parameters(params.values())
-                            .build();
-                    ExecuteStatementResponse response = rdsDataClient.executeStatement(request);
+                    PGobject jsonAssignees = new PGobject();
+                    jsonAssignees.setType("json");
+                    jsonAssignees.setValue(filterParties(assignees));
 
-                    System.out.println("Rows affected: " + response.numberOfRecordsUpdated());
+                    // Prepare SQL statement
+                    String sql = "INSERT INTO applications (applicationId, filingDate, inventionTitle, inventors, applicants, assignees) VALUES (?, ?, ?, ?, ?, ?)";
+                    try (PreparedStatement pstmt = conn.prepareStatement(sql)) {
+                        pstmt.setString(1, applicationId);
+                        pstmt.setDate(2, java.sql.Date.valueOf(filingDate)); // assuming `patent.toString()` returns the patent data
+                        pstmt.setString(3, inventionTitle);
+                        pstmt.setObject(4, jsonInventors);
+                        pstmt.setObject(5, jsonApplicants);
+                        pstmt.setObject(6, jsonAssignees);
+                        pstmt.executeUpdate();
+                     } catch (SQLException throwables) {
+                        throwables.printStackTrace();
+                    }
                 }
+
 
                 dumpReader.close();
             }
@@ -138,6 +170,7 @@ public class ProcessS3AppPatentEventLambda implements RequestHandler<S3Event, St
                 if (Files.exists(localPath)) {
                     Files.delete(localPath);
                 }
+
             } catch (IOException e) {
                 e.printStackTrace();
             }
@@ -146,16 +179,15 @@ public class ProcessS3AppPatentEventLambda implements RequestHandler<S3Event, St
     }
 
 
-    static SqlParameter param(String name, String value, TypeHint typeHint) {
-
-        return SqlParameter.builder().typeHint(typeHint).name(name).value(Field.builder().stringValue(value).build()).build();
-
+    private HeadObjectResponse getHeadObject(S3Client s3Client, String bucket, String key) {
+        HeadObjectRequest headObjectRequest = HeadObjectRequest.builder()
+                .bucket(bucket)
+                .key(key)
+                .build();
+        return s3Client.headObject(headObjectRequest);
     }
 
-    static SqlParameter param(String name, String value) {
 
-        return SqlParameter.builder().name(name).value(Field.builder().stringValue(value).build()).build();
-    }
     public static String filterParties(String jsonArray) throws Exception {
         ObjectMapper mapper = new ObjectMapper();
         ArrayNode arrayNode = (ArrayNode) mapper.readTree(jsonArray);
