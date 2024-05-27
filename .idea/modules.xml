@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="ProjectModuleManager">
+    <modules>
+      <module fileurl="file://$PROJECT_DIR$/.idea/app-patent-lambda.iml" filepath="$PROJECT_DIR$/.idea/app-patent-lambda.iml" />
+      <module fileurl="file://$PROJECT_DIR$/function/layer-java-function.iml" filepath="$PROJECT_DIR$/function/layer-java-function.iml" />
+      <module fileurl="file://$PROJECT_DIR$/layer/layer-java-layer.iml" filepath="$PROJECT_DIR$/layer/layer-java-layer.iml" />
+    </modules>
+  </component>
+</project>
